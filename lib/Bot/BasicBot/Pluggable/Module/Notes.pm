@@ -1,8 +1,9 @@
 package Bot::BasicBot::Pluggable::Module::Notes;
 
 use strict;
+use Data::Dumper;
 use vars qw( $VERSION );
-$VERSION = '0.01';
+$VERSION = '0.02';
 
 use base qw(Bot::BasicBot::Pluggable::Module);
 
@@ -45,9 +46,19 @@ viewed on the web using a small web app (provided).
 
 =cut
 
+## Map commands to methods
+my %commands = (
+    'note to self' => { command => 'nb', method => 'store_note' },
+    'nb' => { command => 'nb', method => 'store_note' },
+    'my notes' => { command => 'mn', method => 'replay_notes' },
+    'mn' => { command => 'mn', method => 'replay_notes' },
+    'search' => { command => 'search', method => 'search'},
+    'show' => { command => 'show', method => 'show' },
+);
+
 sub help {
     my $self = shift;
-    my $helptext = "Simple Note collector for Bot::BasicBot::Pluggable.  Requires direct addressing.  Usage: 'note to self: Put this on the TODO list: Fix Bot docs'.";
+    my $helptext = "Simple Note collector for Bot::BasicBot::Pluggable.  Requires direct addressing.  Usage: !nb (or !{note to self}) <note text>. !mn (or !{my notes} - to view your notes.'.";
     my $notesurl = $self->{notesurl};
     $helptext .= "  The Notes can be viewed at $notesurl" if $notesurl;
     return $helptext;
@@ -59,30 +70,130 @@ sub told {
     my $store = $self->{store}
       or return "Error: no store configured.";
 
-    my $body = $mess->{body};
-    my $who  = $mess->{who};
-    my $channel = $mess->{channel};
-
-    if(!($body =~ s/^note to self:\s*//)) {
-        ## Ignore anything that doesnt start with "note to self:"
+    my $command = $self->parse_command($mess->{body});
+    if(!$command) {
+        $self->{Bot}->say( who => $mess->{who},
+                           channel => $mess->{channel},
+                           body    => "No idea what you meant, try 'help notes'"
+            );
         return;
     }
+
+    my $method = $command->{method};
+    return $self->$method(%$mess, content => $command->{args});
+
+#    return; # nice quiet bot
+}
+
+# Finds all tags within a free-form text string.
+sub parse_tags {
+    local ($_) = @_;
+
+    map {lc} m/#([a-z-]+)/gi;
+}
+
+# !nb or !{note to self}
+sub store_note {
+    my ($self, %args) = @_;
 
     my $now = localtime;
     my $timestamp = $now->strftime("%Y-%m-%d %H:%M:%S");
 
-    my $res = $store->store( timestamp => $timestamp,
-                   name      => $who,
-                   channel   => $channel,
-                   notes     => $body,
+    my $res = $self->{store}->store( timestamp => $timestamp,
+                             name      => $args{who},
+                             channel   => $args{channel},
+                             notes     => $args{content},
+                             tags      => [parse_tags $args{content}]
         );
 
-#    $self->{Bot}->say( who => $who,
-#                       channel => "msg",
-#                       body    => "Stored URL '$url'"
-#                                 . ($comment ? " and comment '$comment'" : "" )
-#    );
-    return; # nice quiet bot
+    $self->{Bot}->say( who => $args{who},
+                       channel => "msg",
+                       body    => "Stored your note.",
+    );
+
+    return;
+}
+
+#!mn or !{my notes}
+sub replay_notes {
+    my ($self, %args) = @_;
+
+    my $notes = $self->format_notes($self->{store}->get_notes(name => $args{who}));
+    $self->{Bot}->say( who => $args{who},
+                       channel => 'msg',
+                       body    => $_
+        ) for(@$notes);
+  
+}
+
+#!search or !{search} <args>
+# by word or by tag, currently
+sub search {
+    my ($self, %args) = @_;
+
+    my $notes = $self->format_notes($self->{store}->get_notes(
+                                        tags => [ parse_tags($args{content}) ]
+                                    ));
+
+    $self->{Bot}->say( who => $args{who},
+                       channel => 'msg',
+                       body    => $_
+        ) for(@$notes);
+    
+
+}
+
+## IN: $notes = arrayref of hashrefs of db data, sorted by channel, time
+## OUT: arrayref of strings to send user
+sub format_notes {
+    my ($self, $notes) = @_;
+
+    if (!@$notes) {
+        return ['Return to sender.  Address unknown.  No such number.  No such zone.'];
+    }
+
+#    warn "Format notes: ", Dumper($notes);
+    my @formatted;
+    foreach my $note (@$notes) {
+        push @formatted, sprintf("[%s] (%s) %s\n", 
+                        $note->{channel}, 
+                        $note->{timestamp}, 
+                        $note->{notes}
+            );
+    }
+
+    return \@formatted;
+}
+
+## Commands in format !foo or !{foo bar}
+## eg !nb some note text
+## !{show channel my notes}
+sub parse_command {
+    my ($self, $text) = @_;
+
+    ## All commands begin with a !
+    return if($text !~ /^!/);
+
+    my ($command) = $text =~ m/^!{([^}]+)/;
+    if(!$command) {
+        ($command) = $text =~ m/^!(\S+)/;
+    }
+    
+    if(!$command) {
+        warn "Command extraction failed! $text";
+        return;
+    }
+
+    $text =~ s/^!{?$command}?\s*//;
+    ## Does this match any known commands?
+    if(exists $commands{$command}) {
+        return { %{$commands{$command}}, args => $text };
+    }
+
+    ## TODO: Add tag parsing
+    ## Do more intelligent parsing here?
+
+    return;
 }
 
 =item B<set_store>
